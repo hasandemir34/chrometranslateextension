@@ -8,15 +8,57 @@ import {
   updateWordStatus,
   updateWordLeitnerLevel,
   updateWordExample,
+  updateWordSM2,
+  updateWordTags,
+  updateWordYDSEnrichment,
   checkWordExists,
   bulkAddSavedWords,
   SavedWord,
+  WordTag,
+  YDSWordEnrichment,
 } from "@/firebase";
 import { exportToCSV, exportToJSON, parseCSVText, parseJSONText } from "@/lib/exportImport";
-import { generateExampleSentence, generateAIStory } from "@/lib/ai";
+import {
+  generateExampleSentence,
+  generateAIStory,
+  enrichWordForYDS,
+  generateYDSMiniExam,
+  generateYDSReadingPassageSet,
+  generateYDSRestatementQuestions,
+  analyzeSentenceForYDS,
+  type YDSExam,
+  type YDSQuestion,
+  type YDSReadingPassageSet,
+  type YDSRestatementQuestion,
+  type YDSSentenceAnalysis,
+} from "@/lib/ai";
+import { buildPresetSavedWords, YDS_PRESET_WORDS } from "@/lib/ydsPresets";
 
 type SortBy = "newest" | "oldest" | "alphabetical-asc" | "alphabetical-desc";
-type QuizSubMode = "flashcard" | "choice" | "type";
+type QuizSubMode = "flashcard" | "choice" | "type" | "restatement";
+type SM2Quality = 0 | 1 | 3 | 5;
+
+const ALL_TAGS: WordTag[] = [
+  "Academic Adjective",
+  "Phrasal Verb",
+  "Prepositional Phrase",
+  "Conjunction",
+  "High Priority YDS",
+  "Noun",
+  "Verb",
+  "Adverb",
+];
+
+const TAG_COLORS: Record<WordTag, string> = {
+  "Academic Adjective": "bg-sky-50 text-sky-700 border-sky-200",
+  "Phrasal Verb": "bg-purple-50 text-purple-700 border-purple-200",
+  "Prepositional Phrase": "bg-teal-50 text-teal-700 border-teal-200",
+  "Conjunction": "bg-amber-50 text-amber-700 border-amber-200",
+  "High Priority YDS": "bg-rose-50 text-rose-700 border-rose-200",
+  "Noun": "bg-slate-100 text-slate-700 border-slate-200",
+  "Verb": "bg-emerald-50 text-emerald-700 border-emerald-200",
+  "Adverb": "bg-indigo-50 text-indigo-700 border-indigo-200",
+};
 
 export default function Home() {
   const [words, setWords] = useState<SavedWord[]>([]);
@@ -28,11 +70,8 @@ export default function Home() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [flippedIds, setFlippedIds] = useState<Set<string>>(new Set());
 
-  // Koyu Mod
-  const theme = "dark";
-
-  // Tab State: "list" veya "quiz"
-  const [activeTab, setActiveTab] = useState<"list" | "quiz">("list");
+  // Tab State
+  const [activeTab, setActiveTab] = useState<"list" | "quiz" | "yds" | "grammar" | "tags">("list");
 
   // Quiz State
   const [quizSubMode, setQuizSubMode] = useState<QuizSubMode>("flashcard");
@@ -47,6 +86,13 @@ export default function Home() {
   const [typingAnswer, setTypingAnswer] = useState("");
   const [typingFeedback, setTypingFeedback] = useState<{ isCorrect: boolean; correctText: string } | null>(null);
 
+  // Restatement Quiz State
+  const [restatementQuestions, setRestatementQuestions] = useState<YDSRestatementQuestion[]>([]);
+  const [restatementLoading, setRestatementLoading] = useState(false);
+  const [restatementIndex, setRestatementIndex] = useState(0);
+  const [restatementSelected, setRestatementSelected] = useState<string | null>(null);
+  const [restatementFeedback, setRestatementFeedback] = useState<{ isCorrect: boolean; selected: string } | null>(null);
+
   // AI State'leri
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
@@ -55,12 +101,41 @@ export default function Home() {
   const [aiStoryLoading, setAiStoryLoading] = useState(false);
   const [aiStoryData, setAiStoryData] = useState<{ storyEn: string; storyTr: string } | null>(null);
 
-  // İçe Aktarma (Import) State'leri
+  // Hazır YDS Paketi State
+  const [presetLoading, setPresetLoading] = useState(false);
+  const [presetMsg, setPresetMsg] = useState("");
+
+  // YDS Zenginleştirme State
+  const [enrichLoadingId, setEnrichLoadingId] = useState<string | null>(null);
+  const [enrichedWordId, setEnrichedWordId] = useState<string | null>(null);
+
+  // YDS Sınav & Paragraf Seti State
+  const [ydsExam, setYdsExam] = useState<YDSExam | null>(null);
+  const [ydsExamLoading, setYdsExamLoading] = useState(false);
+  const [ydsAnswers, setYdsAnswers] = useState<Record<string, string>>({});
+  const [ydsSubmitted, setYdsSubmitted] = useState(false);
+
+  const [passageSet, setPassageSet] = useState<YDSReadingPassageSet | null>(null);
+  const [passageLoading, setPassageLoading] = useState(false);
+  const [passageAnswers, setPassageAnswers] = useState<Record<string, string>>({});
+  const [passageSubmitted, setPassageSubmitted] = useState(false);
+  const [showPassageTr, setShowPassageTr] = useState(false);
+
+  // Görsel Gramer & Cümle Parçalayıcı State
+  const [sentenceInput, setSentenceInput] = useState("");
+  const [sentenceAnalysis, setSentenceAnalysis] = useState<YDSSentenceAnalysis | null>(null);
+  const [sentenceLoading, setSentenceLoading] = useState(false);
+
+  // Etiket State
+  const [activeTagFilter, setActiveTagFilter] = useState<WordTag | "all">("all");
+  const [editTagsId, setEditTagsId] = useState<string | null>(null);
+
+  // İçe Aktarma State'leri
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [importStatus, setImportStatus] = useState("");
   const [importing, setImporting] = useState(false);
 
-  // Manüel kelime ekleme formu için state'ler
+  // Form State
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [newWord, setNewWord] = useState("");
   const [newTranslation, setNewTranslation] = useState("");
@@ -82,113 +157,14 @@ export default function Home() {
     { code: "ja", label: "日本語" },
   ];
 
-  // Koyu Mod ve API Key İlklendirme
   useEffect(() => {
-    document.documentElement.classList.add("dark");
-    localStorage.setItem("theme", "dark");
+    document.documentElement.classList.remove("dark");
+    localStorage.setItem("theme", "light");
     const savedKey = localStorage.getItem("gemini_key") || "";
     setGeminiApiKey(savedKey);
   }, []);
 
-  // Quiz Kartının Her Yeni Kelimede veya Mod Değişiminde Ön Yüzüne Dönmesini Sağlama
-  useEffect(() => {
-    setQuizRevealed(false);
-    setChoiceSelected(null);
-    setChoiceFeedback(null);
-    setTypingAnswer("");
-    setTypingFeedback(null);
-  }, [quizIndex, quizSubMode]);
-
-  // Seçilen Metinden Hızlı Kelime Ekleme State'i
-  const [selectedWordTooltip, setSelectedWordTooltip] = useState<{
-    word: string;
-    x: number;
-    y: number;
-  } | null>(null);
-  const [addingSelectedWord, setAddingSelectedWord] = useState(false);
-  const [quickAddSuccessMsg, setQuickAddSuccessMsg] = useState("");
-
-  // Metin Seçimi Dinleyicisi
-  useEffect(() => {
-    const handleSelectionChange = () => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed) {
-        setSelectedWordTooltip(null);
-        return;
-      }
-
-      const text = selection.toString().trim();
-      if (text.length >= 2 && text.length <= 40) {
-        try {
-          const range = selection.getRangeAt(0);
-          const rect = range.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            setSelectedWordTooltip({
-              word: text,
-              x: rect.left + rect.width / 2,
-              y: rect.top - 45,
-            });
-          }
-        } catch {
-          setSelectedWordTooltip(null);
-        }
-      } else {
-        setSelectedWordTooltip(null);
-      }
-    };
-
-    document.addEventListener("mouseup", handleSelectionChange);
-    return () => {
-      document.removeEventListener("mouseup", handleSelectionChange);
-    };
-  }, []);
-
-  // Seçilen Kelimeyi Deftere Hızlı Ekleme
-  const handleAddSelectedWord = async () => {
-    if (!selectedWordTooltip || addingSelectedWord) return;
-
-    const wordToAdd = selectedWordTooltip.word.trim();
-    setAddingSelectedWord(true);
-
-    // 1. Çift Kontrolü
-    const exists = await checkWordExists(wordToAdd);
-    if (exists) {
-      alert(`⚠️ "${wordToAdd}" kelimesi defterinizde zaten ekli!`);
-      setAddingSelectedWord(false);
-      setSelectedWordTooltip(null);
-      return;
-    }
-
-    // 2. Google Translate ile Hızlı Türkçe Çeviri Al
-    let translation = wordToAdd;
-    try {
-      const res = await fetch(
-        `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q=${encodeURIComponent(wordToAdd)}`
-      );
-      const data = await res.json();
-      if (data?.[0]?.[0]?.[0]) {
-        translation = data[0][0][0];
-      }
-    } catch {
-      translation = wordToAdd;
-    }
-
-    // 3. Firestore'a Ekle
-    const added = await addSavedWord(wordToAdd, translation, "en", "tr");
-    if (added) {
-      setWords((prev) => [added, ...prev]);
-      setQuickAddSuccessMsg(`✔ "${wordToAdd}" defterinize eklendi! (${translation})`);
-      setTimeout(() => setQuickAddSuccessMsg(""), 4000);
-    } else {
-      alert("Kelime eklenirken hata oluştu.");
-    }
-
-    setAddingSelectedWord(false);
-    setSelectedWordTooltip(null);
-    window.getSelection()?.removeAllRanges();
-  };
-
-  // Firestore Verilerini Yükleme
+  // Kelimeleri Firestore'dan Çekme
   useEffect(() => {
     async function loadData() {
       setLoading(true);
@@ -199,102 +175,123 @@ export default function Home() {
     loadData();
   }, []);
 
-  // API Key kaydetme
-  const handleSaveApiKey = (key: string) => {
-    setGeminiApiKey(key);
-    localStorage.setItem("gemini_key", key);
-    setShowApiKeyModal(false);
+  // Quiz Sıfırlama
+  useEffect(() => {
+    setQuizRevealed(false);
+    setChoiceSelected(null);
+    setChoiceFeedback(null);
+    setTypingAnswer("");
+    setTypingFeedback(null);
+    setRestatementSelected(null);
+    setRestatementFeedback(null);
+  }, [quizIndex, quizSubMode]);
+
+  // Hazır YDS Paketi Yükleme
+  const handleLoadPresetWords = async () => {
+    setPresetLoading(true);
+    setPresetMsg("YDS Akademik Kelimeleri & Kalıpları Yükleniyor...");
+    const presets = buildPresetSavedWords();
+    const count = await bulkAddSavedWords(presets);
+    setPresetMsg(`✔ ${count} adet yüksek öncelikli YDS kelimesi ve edat kalıbı defterinize eklendi!`);
+    const updated = await getSavedWords();
+    setWords(updated);
+    setPresetLoading(false);
   };
 
-  // Kelime silme işlemi
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  // YDS 4'lü Paragraf Sınavı Üretme
+  const handleGeneratePassageSet = async () => {
+    setPassageLoading(true);
+    setPassageSubmitted(false);
+    setPassageAnswers({});
+    const sample = words.length > 0 ? words.slice(0, 6) : YDS_PRESET_WORDS.slice(0, 6);
+    const result = await generateYDSReadingPassageSet(sample, geminiApiKey);
+    setPassageSet(result);
+    setPassageLoading(false);
+  };
+
+  // Restatement Soruları Üretme
+  const handleGenerateRestatement = async () => {
+    setRestatementLoading(true);
+    setRestatementIndex(0);
+    setRestatementSelected(null);
+    setRestatementFeedback(null);
+    const questions = await generateYDSRestatementQuestions(words, geminiApiKey);
+    setRestatementQuestions(questions);
+    setRestatementLoading(false);
+  };
+
+  // Cümle Parçalama Analizi
+  const handleAnalyzeSentenceSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!sentenceInput.trim()) return;
+    setSentenceLoading(true);
+    const result = await analyzeSentenceForYDS(sentenceInput, geminiApiKey);
+    setSentenceAnalysis(result);
+    setSentenceLoading(false);
+  };
+
+  // Kelime Silme
+  const handleDeleteWord = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (confirm("Bu kelimeyi silmek istediğinize emin misiniz?")) {
-      setDeletingId(id);
-      const success = await deleteSavedWord(id);
-      if (success) {
-        setWords((prev) => prev.filter((w) => w.id !== id));
-      } else {
-        alert("Kelime silinirken bir hata oluştu.");
-      }
-      setDeletingId(null);
+    if (!confirm("Bu kelimeyi silmek istediğinize emin misiniz?")) return;
+    setDeletingId(id);
+    const ok = await deleteSavedWord(id);
+    if (ok) {
+      setWords((prev) => prev.filter((w) => w.id !== id));
+    } else {
+      alert("Kelime silinirken hata oluştu.");
     }
+    setDeletingId(null);
   };
 
-  // Status Manuel Değiştirme
-  const handleToggleStatus = async (e: React.MouseEvent, item: SavedWord) => {
-    e.stopPropagation();
-    const newStatus = item.status === "learning" ? "memorized" : "learning";
-    const success = await updateWordStatus(item.id, newStatus);
+  // Leitner / SM-2 Doğru Yanıt
+  const handleQuizAnswerCorrect = async (wordId: string) => {
+    setQuizRevealed(false);
+    const item = words.find((w) => w.id === wordId);
+    if (!item) return;
+
+    const currentLevel = item.level || 1;
+    const nextLevel = Math.min(5, currentLevel + 1);
+    const daysToAdd = [0, 1, 2, 4, 7, 14][nextLevel];
+    const nextReview = new Date();
+    nextReview.setDate(nextReview.getDate() + daysToAdd);
+
+    const success = await updateWordLeitnerLevel(wordId, nextLevel, nextReview.toISOString());
     if (success) {
       setWords((prev) =>
         prev.map((w) =>
-          w.id === item.id ? { ...w, status: newStatus, level: newStatus === "memorized" ? 5 : 1 } : w
+          w.id === wordId
+            ? { ...w, level: nextLevel, status: nextLevel === 5 ? "memorized" : "learning", nextReviewDate: nextReview.toISOString() }
+            : w
         )
       );
-    } else {
-      alert("Durum güncellenirken bir hata oluştu.");
+      if (quizIndex < quizWords.length - 1) setQuizIndex((prev) => prev + 1);
+      else setQuizIndex(0);
     }
   };
 
-  // Kartın ön/arka yüzünü değiştirme
-  const toggleFlip = (id: string) => {
-    setFlippedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  // Leitner / SM-2 Yanlış Yanıt
+  const handleQuizAnswerWrong = async (wordId: string) => {
+    setQuizRevealed(false);
+    const item = words.find((w) => w.id === wordId);
+    if (!item) return;
 
-  // Sesli telaffuz (Text-to-Speech)
-  const handleSpeak = (e: React.MouseEvent, text: string, lang: string) => {
-    e.stopPropagation();
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const nextLevel = 1;
+    const nextReview = new Date();
+    nextReview.setDate(nextReview.getDate() + 1);
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    const langMap: Record<string, string> = {
-      en: "en-US", de: "de-DE", fr: "fr-FR", es: "es-ES",
-      it: "it-IT", pt: "pt-PT", ru: "ru-RU", ja: "ja-JP",
-      ko: "ko-KR", zh: "zh-CN", tr: "tr-TR"
-    };
-
-    utterance.lang = langMap[lang.toLowerCase()] || lang || "en-US";
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // Manüel kelime ekleme formu gönderimi (Çift Kontrolü ile)
-  const handleAddWordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFormError("");
-    const trimmedWord = newWord.trim();
-    const trimmedTrans = newTranslation.trim();
-
-    if (!trimmedWord || !trimmedTrans) {
-      setFormError("Lütfen tüm alanları doldurun.");
-      return;
+    const success = await updateWordLeitnerLevel(wordId, nextLevel, nextReview.toISOString());
+    if (success) {
+      setWords((prev) =>
+        prev.map((w) =>
+          w.id === wordId
+            ? { ...w, level: nextLevel, status: "learning", nextReviewDate: nextReview.toISOString() }
+            : w
+        )
+      );
+      if (quizIndex < quizWords.length - 1) setQuizIndex((prev) => prev + 1);
+      else setQuizIndex(0);
     }
-
-    setFormSubmitting(true);
-
-    // Çift kontrolü (Duplicate Detection)
-    const exists = await checkWordExists(trimmedWord);
-    if (exists) {
-      setFormError("⚠️ Bu kelime defterinizde zaten ekli!");
-      setFormSubmitting(false);
-      return;
-    }
-
-    const added = await addSavedWord(trimmedWord, trimmedTrans, newSourceLang, newTargetLang);
-    if (added) {
-      setWords((prev) => [added, ...prev]);
-      setNewWord("");
-      setNewTranslation("");
-      setIsFormOpen(false);
-    } else {
-      setFormError("Kelime eklenirken hata oluştu.");
-    }
-    setFormSubmitting(false);
   };
 
   // AI Örnek Cümle Üretme
@@ -317,56 +314,70 @@ export default function Home() {
     setAiSentenceLoadingId(null);
   };
 
-  // AI Okuma Metni Üretme
+  // AI Okuma Metni Modal
   const handleGenerateStoryModal = async () => {
     setAiStoryOpen(true);
     setAiStoryLoading(true);
-    const sampleWords = words.slice(0, 5);
+    const sampleWords = words.length > 0 ? words.slice(0, 5) : YDS_PRESET_WORDS.slice(0, 5);
     const result = await generateAIStory(sampleWords, geminiApiKey);
     setAiStoryData(result);
     setAiStoryLoading(false);
   };
 
-  // Dosyadan Toplu Yükleme (CSV / JSON Import)
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setImporting(true);
-    setImportStatus("Dosya okunuyor...");
-    const text = await file.text();
-    let parsed: { word: string; translation: string; sourceLang?: string; targetLang?: string }[] = [];
-
-    if (file.name.endsWith(".json")) {
-      parsed = parseJSONText(text);
-    } else {
-      parsed = parseCSVText(text);
+  // YDS Zenginleştirme
+  const handleEnrichWord = async (e: React.MouseEvent, item: SavedWord) => {
+    e.stopPropagation();
+    setEnrichLoadingId(item.id);
+    const data = await enrichWordForYDS(item.word, item.translation, geminiApiKey);
+    const ok = await updateWordYDSEnrichment(item.id, data);
+    if (ok) {
+      setWords((prev) =>
+        prev.map((w) => (w.id === item.id ? { ...w, ...data } : w))
+      );
+      setEnrichedWordId(item.id);
     }
+    setEnrichLoadingId(null);
+  };
 
-    if (parsed.length === 0) {
-      setImportStatus("❌ Dosyada geçerli kelime bulunamadı.");
-      setImporting(false);
+  // Manüel Ekleme
+  const handleAddWordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError("");
+    const trimmedWord = newWord.trim();
+    const trimmedTrans = newTranslation.trim();
+
+    if (!trimmedWord || !trimmedTrans) {
+      setFormError("Lütfen tüm alanları doldurun.");
       return;
     }
 
-    setImportStatus(`${parsed.length} kelime veritabanına ekleniyor...`);
-    const count = await bulkAddSavedWords(parsed);
-    setImportStatus(`✔ ${count} kelime başarıyla eklendi!`);
-    setImporting(false);
+    setFormSubmitting(true);
+    const exists = await checkWordExists(trimmedWord);
+    if (exists) {
+      setFormError("⚠️ Bu kelime defterinizde zaten ekli!");
+      setFormSubmitting(false);
+      return;
+    }
 
-    // Yeniden verileri yükle
-    const updated = await getSavedWords();
-    setWords(updated);
+    const added = await addSavedWord(trimmedWord, trimmedTrans, newSourceLang, newTargetLang);
+    if (added) {
+      setWords((prev) => [added, ...prev]);
+      setNewWord("");
+      setNewTranslation("");
+      setIsFormOpen(false);
+    } else {
+      setFormError("Kelime eklenirken hata oluştu.");
+    }
+    setFormSubmitting(false);
   };
 
-  // Quiz Havuzu (Sadece "learning" veya Level < 5 olanlar)
+  // Quiz Kelimeleri
   const quizWords = useMemo(() => {
     return words.filter((w) => (w.level ? w.level < 5 : w.status === "learning"));
   }, [words]);
 
   const currentQuizWord = quizWords[quizIndex] || quizWords[0];
 
-  // Çoktan Seçmeli Şıkları Oluşturma
   const choiceOptions = useMemo(() => {
     if (!currentQuizWord) return [];
     const correct = currentQuizWord.translation;
@@ -375,922 +386,787 @@ export default function Home() {
       .map((w) => w.translation);
 
     const shuffledOthers = [...others].sort(() => 0.5 - Math.random()).slice(0, 3);
-    const allChoices = [correct, ...shuffledOthers].sort(() => 0.5 - Math.random());
-    return allChoices;
+    return [correct, ...shuffledOthers].sort(() => 0.5 - Math.random());
   }, [currentQuizWord, words]);
 
-  // Aralıklı Tekrar (Leitner) - Doğru Yanıt
-  const handleQuizAnswerCorrect = async (wordId: string) => {
-    setQuizRevealed(false);
-    const item = words.find((w) => w.id === wordId);
-    if (!item) return;
-
-    const currentLevel = item.level || 1;
-    const nextLevel = Math.min(5, currentLevel + 1);
-    const daysToAdd = [0, 1, 2, 4, 7, 14][nextLevel];
-    const nextReview = new Date();
-    nextReview.setDate(nextReview.getDate() + daysToAdd);
-
-    const success = await updateWordLeitnerLevel(wordId, nextLevel, nextReview.toISOString());
-    if (success) {
-      setWords((prev) =>
-        prev.map((w) =>
-          w.id === wordId
-            ? {
-                ...w,
-                level: nextLevel,
-                status: nextLevel === 5 ? "memorized" : "learning",
-                nextReviewDate: nextReview.toISOString(),
-              }
-            : w
-        )
-      );
-      resetQuizState();
-    }
-  };
-
-  // Aralıklı Tekrar (Leitner) - Yanlış Yanıt
-  const handleQuizAnswerWrong = async (wordId: string) => {
-    setQuizRevealed(false);
-    const item = words.find((w) => w.id === wordId);
-    if (!item) return;
-
-    const nextLevel = 1;
-    const nextReview = new Date();
-    const success = await updateWordLeitnerLevel(wordId, nextLevel, nextReview.toISOString());
-    if (success) {
-      setWords((prev) =>
-        prev.map((w) =>
-          w.id === wordId
-            ? {
-                ...w,
-                level: nextLevel,
-                status: "learning",
-                nextReviewDate: nextReview.toISOString(),
-              }
-            : w
-        )
-      );
-      resetQuizState();
-    }
-  };
-
-  const resetQuizState = () => {
-    setQuizRevealed(false);
-    setChoiceSelected(null);
-    setChoiceFeedback(null);
-    setTypingAnswer("");
-    setTypingFeedback(null);
-    if (quizWords.length > 1) {
-      setQuizIndex((prev) => (prev + 1) % quizWords.length);
-    } else {
-      setQuizIndex(0);
-    }
-  };
-
-  // Benzersiz kaynak dilleri
-  const uniqueSourceLangs = useMemo(() => {
-    const langs = new Set<string>();
-    words.forEach((w) => w.sourceLang && langs.add(w.sourceLang.toLowerCase()));
-    return Array.from(langs);
-  }, [words]);
-
-  // Arama ve Filtreleme
-  const filteredAndSortedWords = useMemo(() => {
-    const result = words.filter((w) => {
-      const term = search.toLowerCase();
-      const matchesSearch = w.word.toLowerCase().includes(term) || w.translation.toLowerCase().includes(term);
-      const matchesLang = filterLang === "all" || w.sourceLang.toLowerCase() === filterLang;
-      const matchesStatus = listFilterStatus === "all" || w.status === listFilterStatus;
-      return matchesSearch && matchesLang && matchesStatus;
-    });
-
-    if (sortBy === "newest") {
-      result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    } else if (sortBy === "oldest") {
-      result.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    } else if (sortBy === "alphabetical-asc") {
-      result.sort((a, b) => a.word.localeCompare(b.word));
-    } else if (sortBy === "alphabetical-desc") {
-      result.sort((a, b) => b.word.localeCompare(a.word));
-    }
-    return result;
-  }, [words, search, sortBy, filterLang, listFilterStatus]);
+  // Filtrelenmiş ve Sıralanmış Kelimeler
+  const filteredWords = useMemo(() => {
+    return words
+      .filter((w) => {
+        const matchesSearch =
+          w.word.toLowerCase().includes(search.toLowerCase()) ||
+          w.translation.toLowerCase().includes(search.toLowerCase());
+        const matchesLang = filterLang === "all" || w.sourceLang === filterLang;
+        const matchesStatus = listFilterStatus === "all" || w.status === listFilterStatus;
+        const matchesTag = activeTagFilter === "all" || w.tags?.includes(activeTagFilter);
+        return matchesSearch && matchesLang && matchesStatus && matchesTag;
+      })
+      .sort((a, b) => {
+        if (sortBy === "newest") return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        if (sortBy === "oldest") return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (sortBy === "alphabetical-asc") return a.word.localeCompare(b.word);
+        if (sortBy === "alphabetical-desc") return b.word.localeCompare(a.word);
+        return 0;
+      });
+  }, [words, search, filterLang, listFilterStatus, activeTagFilter, sortBy]);
 
   // İstatistikler
-  const stats = useMemo(() => {
-    const total = words.length;
-    const learning = words.filter((w) => w.status === "learning").length;
-    const memorized = words.filter((w) => w.status === "memorized").length;
-    return { total, learning, memorized };
-  }, [words]);
+  const totalCount = words.length;
+  const memorizedCount = words.filter((w) => w.status === "memorized").length;
+  const learningCount = words.filter((w) => w.status === "learning").length;
+  const memorizedPercent = totalCount > 0 ? Math.round((memorizedCount / totalCount) * 100) : 0;
 
-  const formatDate = (isoStr: string) => {
-    if (!isoStr) return "";
-    try {
-      return new Date(isoStr).toLocaleDateString("tr-TR", {
-        day: "numeric", month: "short", year: "numeric",
-      });
-    } catch { return ""; }
-  };
+  // YDS Kelime Yetkinlik Metriği
+  const ydsReadinessLevel = memorizedPercent > 80 ? "C1/C2 (YDS 85+)" : memorizedPercent > 50 ? "B2/C1 (YDS 70+)" : "B1/B2 (YDS 50+)";
 
   return (
-    <div className="min-h-screen pb-16 font-sans relative bg-[#090d16] text-[#f8fafc] antialiased selection:bg-indigo-500 selection:text-white">
-      {/* Şık Arka Plan Işık Efektleri */}
-      <div className="fixed top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full blur-[140px] pointer-events-none bg-indigo-600/10" />
-      <div className="fixed bottom-[-20%] right-[-10%] w-[60%] h-[60%] rounded-full blur-[140px] pointer-events-none bg-purple-600/10" />
-
-      {/* Header (Cam Tasarımı) */}
-      <header className="border-b sticky top-0 z-40 backdrop-blur-xl border-slate-800/80 bg-slate-950/75 shadow-lg">
-        <div className="max-w-5xl mx-auto px-4 py-3.5 flex justify-between items-center">
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans pb-24 md:pb-8">
+      {/* HEADER / ÜST BAR */}
+      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-xl shadow-md shadow-indigo-500/20">
-              📖
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center font-black text-white text-lg shadow-lg shadow-blue-500/20">
+              YDS
             </div>
             <div>
-              <h1 className="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent">
-                Kelime Defterim Pro
+              <h1 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
+                YDS Sınav & Kelime Asistanı
+                <span className="text-[10px] bg-blue-500/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full font-bold">
+                  PWA Mobile
+                </span>
               </h1>
-              <p className="text-xs text-slate-300 font-medium">
-                Leitner 5x Algoritması & Yapay Zeka
+              <p className="text-xs text-slate-400 hidden sm:block">
+                Leitner & SM-2 Hafıza Sistemi | Yapay Zeka Sınav Koçu
               </p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-2 sm:gap-3">
-            {/* AI Key Butonu */}
+
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowApiKeyModal(true)}
-              className={`px-3 py-2 rounded-xl border text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm active:scale-95 ${
-                geminiApiKey
-                  ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-                  : "border-purple-500/50 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25"
-              }`}
-              title="Gemini AI API Anahtarı Ayarları"
+              onClick={handleLoadPresetWords}
+              disabled={presetLoading}
+              className="bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold text-xs px-3 py-2 rounded-xl transition shadow-md flex items-center gap-1.5 active:scale-95"
             >
-              <span>{geminiApiKey ? "✨ AI Aktif" : "🔑 AI Key"}</span>
+              <span>⚡ Hazır YDS Paket</span>
             </button>
 
-            {/* Yeni Kelime Ekle Butonu */}
             <button
-              onClick={() => setIsFormOpen(!isFormOpen)}
-              className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-500 via-indigo-600 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/25 active:scale-95"
+              onClick={() => setShowApiKeyModal(true)}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs px-3 py-2 rounded-xl border border-slate-700 transition flex items-center gap-1"
             >
-              {isFormOpen ? "Kapat ✕" : "➕ Kelime Ekle"}
+              <span>🔑 API Key</span>
             </button>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 mt-6">
-        
-        {/* İstatistikler & Dışa/İçe Aktar Kartları */}
-        <section className="grid grid-cols-1 sm:grid-cols-4 gap-3 mb-6">
-          <div className="border rounded-2xl p-4 flex flex-col justify-center backdrop-blur-md shadow-sm transition-all hover:border-slate-700 bg-slate-900/60 border-slate-800/80">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">Toplam Kelime</span>
-            <span className="text-2xl font-extrabold text-indigo-400 mt-0.5">{stats.total}</span>
+      {/* ANA İÇERİK KONTEYNERİ */}
+      <main className="max-w-7xl mx-auto px-4 pt-6 flex-1 w-full space-y-6">
+        {/* İSTATİSTİK BAR / YDS SKOR METRİĞİ */}
+        <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 flex flex-col justify-between">
+            <span className="text-xs font-semibold text-slate-400">Toplam Kelime</span>
+            <span className="text-2xl font-extrabold text-white mt-1">{totalCount}</span>
           </div>
 
-          <div className="border rounded-2xl p-4 flex flex-col justify-center backdrop-blur-md shadow-sm transition-all hover:border-slate-700 bg-slate-900/60 border-slate-800/80">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400/90">Öğreniliyor</span>
-            <span className="text-2xl font-extrabold text-amber-400 mt-0.5">{stats.learning}</span>
+          <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 flex flex-col justify-between">
+            <span className="text-xs font-semibold text-amber-400">Öğreniliyor</span>
+            <span className="text-2xl font-extrabold text-amber-400 mt-1">{learningCount}</span>
           </div>
 
-          <div className="border rounded-2xl p-4 flex flex-col justify-center backdrop-blur-md shadow-sm transition-all hover:border-slate-700 bg-slate-900/60 border-slate-800/80">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400/90">Ezberlendi</span>
-            <span className="text-2xl font-extrabold text-emerald-400 mt-0.5">{stats.memorized}</span>
+          <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 flex flex-col justify-between">
+            <span className="text-xs font-semibold text-emerald-400">Ezberlendi</span>
+            <span className="text-2xl font-extrabold text-emerald-400 mt-1">{memorizedCount}</span>
           </div>
 
-          {/* Dışa/İçe Aktar Paneli */}
-          <div className="border rounded-2xl p-4 flex items-center justify-around backdrop-blur-md shadow-sm gap-2 bg-slate-900/60 border-slate-800/80">
-            <button
-              onClick={() => setIsImportModalOpen(true)}
-              className="text-xs font-bold text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1.5"
-              title="CSV veya JSON Yükle"
-            >
-              📥 İçe Aktar
-            </button>
-            <span className="text-slate-700 font-bold">|</span>
-            <button
-              onClick={() => exportToCSV(words)}
-              className="text-xs font-bold text-purple-400 hover:text-purple-300 transition flex items-center gap-1.5"
-              title="CSV Olarak İndir"
-            >
-              📤 Dışa Aktar
-            </button>
+          <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 flex flex-col justify-between">
+            <span className="text-xs font-semibold text-blue-400">Tahmini YDS Skoru</span>
+            <span className="text-sm font-extrabold text-blue-400 mt-1">{ydsReadinessLevel}</span>
           </div>
         </section>
 
-        {/* Ana Tab Navigasyonu */}
-        <div className="flex border-b mb-6 justify-between items-center border-slate-800">
-          <div className="flex gap-2 sm:gap-4">
-            <button
-              onClick={() => setActiveTab("list")}
-              className={`pb-3 text-sm font-bold border-b-2 transition-all px-4 flex items-center gap-2 ${
-                activeTab === "list"
-                  ? "border-indigo-500 text-indigo-400"
-                  : "border-transparent text-slate-300 hover:text-slate-100"
-              }`}
-            >
-              📋 Kelime Listem
-              <span className="bg-slate-800 text-slate-300 text-[11px] px-2 py-0.5 rounded-full font-bold">
-                {words.length}
-              </span>
-            </button>
-            <button
-              onClick={() => {
-                setActiveTab("quiz");
-                setQuizIndex(0);
-                setQuizRevealed(false);
-              }}
-              className={`pb-3 text-sm font-bold border-b-2 transition-all px-4 flex items-center gap-2 ${
-                activeTab === "quiz"
-                  ? "border-purple-500 text-purple-400"
-                  : "border-transparent text-slate-300 hover:text-slate-100"
-              }`}
-            >
-              ⚡ Çoklu Pratik (Quiz)
-              {quizWords.length > 0 && (
-                <span className="bg-purple-950 text-purple-300 border border-purple-800/80 px-2 py-0.5 rounded-full text-[11px] font-bold">
-                  {quizWords.length}
-                </span>
-              )}
-            </button>
+        {presetMsg && (
+          <div className="bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 p-3 rounded-2xl text-xs font-semibold flex items-center justify-between">
+            <span>{presetMsg}</span>
+            <button onClick={() => setPresetMsg("")} className="text-emerald-400 font-bold px-2">×</button>
+          </div>
+        )}
+
+        {/* TAB GEZİNTİ BAR (MASAÜSTÜ) */}
+        <div className="hidden md:flex items-center justify-between border-b border-slate-800">
+          <div className="flex gap-2">
+            {[
+              { id: "list", label: "Kelime Defterim", count: totalCount, icon: "📚" },
+              { id: "quiz", label: "Pratik & Quiz", count: quizWords.length, icon: "⚡" },
+              { id: "yds", label: "YDS Sınav & Paragraf", icon: "📝" },
+              { id: "grammar", label: "Gramer & Cümle Analiz", icon: "🔬" },
+              { id: "tags", label: "Etiketler", icon: "🏷️" },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`pb-3 text-sm font-bold border-b-2 px-4 flex items-center gap-2 transition ${
+                  activeTab === tab.id
+                    ? "border-blue-500 text-blue-400"
+                    : "border-transparent text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <span>{tab.icon}</span>
+                <span>{tab.label}</span>
+                {tab.count !== undefined && (
+                  <span className="bg-slate-800 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-extrabold">
+                    {tab.count}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
 
-          <button
-            onClick={handleGenerateStoryModal}
-            className="pb-3 text-xs font-extrabold text-amber-400 hover:text-amber-300 transition flex items-center gap-1.5"
-          >
-            ✨ AI Okuma Metni Oluştur
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsFormOpen(!isFormOpen)}
+              className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded-xl transition flex items-center gap-1"
+            >
+              <span>+ Yeni Kelime</span>
+            </button>
+
+            <button
+              onClick={handleGenerateStoryModal}
+              className="bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs px-3 py-2 rounded-xl transition flex items-center gap-1"
+            >
+              <span>✨ AI Paragraf</span>
+            </button>
+          </div>
         </div>
 
-        {/* Form: Yeni Kelime Ekleme */}
+        {/* FORM: MANÜEL KELİME EKLEME */}
         {isFormOpen && (
-          <section className="mb-6 border rounded-3xl p-6 shadow-2xl backdrop-blur-xl bg-slate-900/90 border-slate-800 space-y-4">
+          <section className="bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-4">
             <div className="flex justify-between items-center">
-              <h3 className="text-sm font-bold text-slate-100">➕ Deftere Yeni Kelime Ekle</h3>
-              <span className="text-xs text-slate-300 font-medium">Otomatik çift kontrolü aktiftir</span>
+              <h3 className="text-sm font-bold text-white">Deftere Yeni Kelime / Kalıp Ekle</h3>
+              <button onClick={() => setIsFormOpen(false)} className="text-slate-400 hover:text-white font-bold text-lg">×</button>
             </div>
 
             <form onSubmit={handleAddWordSubmit} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold mb-1.5 text-slate-300">Orijinal Kelime / Cümle</label>
+                  <label className="block text-xs font-semibold mb-1 text-slate-300">İngilizce Kelime / Kalıp</label>
                   <input
                     type="text"
                     value={newWord}
                     onChange={(e) => setNewWord(e.target.value)}
-                    placeholder="Örn: resilience"
-                    className="w-full rounded-xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500/50 bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500"
+                    placeholder="Örn: relinquish"
+                    className="w-full rounded-xl px-4 py-2.5 text-sm bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold mb-1.5 text-slate-300">Türkçe Çevirisi</label>
+                  <label className="block text-xs font-semibold mb-1 text-slate-300">Türkçe Anlamı</label>
                   <input
                     type="text"
                     value={newTranslation}
                     onChange={(e) => setNewTranslation(e.target.value)}
-                    placeholder="Örn: esneklik, direnç"
-                    className="w-full rounded-xl px-4 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500/50 bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500"
+                    placeholder="Örn: feragat etmek, bırakmak"
+                    className="w-full rounded-xl px-4 py-2.5 text-sm bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold mb-1.5 text-slate-300">Kaynak Dil</label>
-                  <select
-                    value={newSourceLang}
-                    onChange={(e) => setNewSourceLang(e.target.value)}
-                    className="w-full rounded-xl px-3 py-2.5 text-sm font-medium bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none"
-                  >
-                    {languagesList.map((lang) => (
-                      <option key={lang.code} value={lang.code}>{lang.label} ({lang.code.toUpperCase()})</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold mb-1.5 text-slate-300">Hedef Dil</label>
-                  <select
-                    value={newTargetLang}
-                    onChange={(e) => setNewTargetLang(e.target.value)}
-                    className="w-full rounded-xl px-3 py-2.5 text-sm font-medium bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none"
-                  >
-                    {languagesList.map((lang) => (
-                      <option key={lang.code} value={lang.code}>{lang.label} ({lang.code.toUpperCase()})</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {formError && <p className="text-xs text-rose-400 font-bold bg-rose-950/40 p-2.5 rounded-xl border border-rose-800/40">{formError}</p>}
+              {formError && <p className="text-xs text-rose-400 font-semibold">{formError}</p>}
 
               <button
                 type="submit"
                 disabled={formSubmitting}
-                className="w-full bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-50 text-white font-bold text-xs py-3 px-4 rounded-xl shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition"
               >
-                {formSubmitting ? "Kaydediliyor..." : "Deftere Kaydet ✔"}
+                {formSubmitting ? "Kaydediliyor..." : "Deftere Ekle"}
               </button>
             </form>
           </section>
         )}
 
-        {/* TAB 1: KELİME LİSTEM */}
+        {/* TAB 1: KELİME LİSTESİ */}
         {activeTab === "list" && (
-          <>
-            {/* Filtre ve Arama Barı */}
-            <section className="border rounded-2xl p-4 mb-6 backdrop-blur-md bg-slate-900/40 border-slate-800/70 space-y-4">
-              <div className="flex flex-col gap-3">
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400 text-sm">🔍</span>
-                  <input
-                    type="text"
-                    placeholder="Kelime veya çeviri ara..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="w-full rounded-xl pl-10 pr-10 py-2.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500/50 bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500"
-                  />
-                  {search && (
-                    <button onClick={() => setSearch("")} className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-200">✕</button>
-                  )}
-                </div>
+          <div className="space-y-4">
+            {/* ARAMA VE FİLTRE BAR */}
+            <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input
+                  type="text"
+                  placeholder="Kelime veya Türkçe anlam ara..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="flex-1 rounded-xl px-4 py-2.5 text-sm bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                />
 
-                <div className="flex flex-wrap gap-3 items-center justify-between">
-                  {/* Status Filtreleri */}
-                  <div className="flex gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800">
-                    <button
-                      onClick={() => setListFilterStatus("all")}
-                      className={`py-1 px-3 rounded-lg text-xs font-bold transition ${
-                        listFilterStatus === "all" ? "bg-slate-800 text-white" : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Tümü
-                    </button>
-                    <button
-                      onClick={() => setListFilterStatus("learning")}
-                      className={`py-1 px-3 rounded-lg text-xs font-bold transition ${
-                        listFilterStatus === "learning" ? "bg-amber-950 text-amber-300 border border-amber-800/60" : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Öğreniliyor
-                    </button>
-                    <button
-                      onClick={() => setListFilterStatus("memorized")}
-                      className={`py-1 px-3 rounded-lg text-xs font-bold transition ${
-                        listFilterStatus === "memorized" ? "bg-emerald-950 text-emerald-300 border border-emerald-800/60" : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Ezberlendi
-                    </button>
-                  </div>
+                <div className="flex gap-2">
+                  <select
+                    value={listFilterStatus}
+                    onChange={(e) => setListFilterStatus(e.target.value as any)}
+                    className="rounded-xl px-3 py-2 text-xs font-bold bg-slate-900 border border-slate-700 text-slate-300 focus:outline-none"
+                  >
+                    <option value="all">Tüm Durumlar</option>
+                    <option value="learning">Öğreniliyor</option>
+                    <option value="memorized">Ezberlendi</option>
+                  </select>
 
-                  {/* Dil & Sıralama Kontrolleri */}
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1 overflow-x-auto max-w-[200px] sm:max-w-none">
-                      <button
-                        onClick={() => setFilterLang("all")}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
-                          filterLang === "all" ? "bg-indigo-600 border-indigo-500 text-white" : "bg-slate-950 border-slate-800 text-slate-300"
-                        }`}
-                      >
-                        Dil: Tümü
-                      </button>
-                      {uniqueSourceLangs.map((lang) => (
-                        <button
-                          key={lang}
-                          onClick={() => setFilterLang(lang)}
-                          className={`px-2 py-1 rounded-lg text-[11px] font-bold uppercase border ${
-                            filterLang === lang ? "bg-indigo-600 border-indigo-500 text-white" : "bg-slate-950 border-slate-800 text-slate-300"
-                          }`}
-                        >
-                          {lang}
-                        </button>
-                      ))}
-                    </div>
-
-                    <select
-                      value={sortBy}
-                      onChange={(e) => setSortBy(e.target.value as SortBy)}
-                      className="rounded-lg px-2.5 py-1 text-xs font-bold bg-slate-950 border border-slate-800 text-slate-300 focus:outline-none"
-                    >
-                      <option value="newest">En Yeni</option>
-                      <option value="oldest">En Eski</option>
-                      <option value="alphabetical-asc">A - Z</option>
-                      <option value="alphabetical-desc">Z - A</option>
-                    </select>
-                  </div>
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as any)}
+                    className="rounded-xl px-3 py-2 text-xs font-bold bg-slate-900 border border-slate-700 text-slate-300 focus:outline-none"
+                  >
+                    <option value="newest">En Yeni</option>
+                    <option value="oldest">En Eski</option>
+                    <option value="alphabetical-asc">A-Z</option>
+                    <option value="alphabetical-desc">Z-A</option>
+                  </select>
                 </div>
               </div>
-            </section>
+            </div>
 
-            {/* Kelime Listesi Grid */}
+            {/* KELİME KARTLARI IZGARASI */}
             {loading ? (
-              <section className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="h-52 border border-slate-800/80 rounded-2xl animate-pulse bg-slate-900/40 p-5" />
-                ))}
-              </section>
-            ) : filteredAndSortedWords.length === 0 ? (
-              <section className="text-center py-16 border border-dashed rounded-3xl p-6 border-slate-800 bg-slate-900/20">
-                <span className="text-4xl">📭</span>
-                <h3 className="text-sm font-bold mt-4 text-slate-300">Henüz Kayıtlı Kelime Yok</h3>
-                <p className="text-xs text-slate-300 mt-1">Yukarıdaki "Kelime Ekle" veya "İçe Aktar" butonuyla yeni kelimeler yükleyebilirsiniz.</p>
-              </section>
+              <div className="text-center py-12 text-slate-400 font-semibold text-sm">Yükleniyor...</div>
+            ) : filteredWords.length === 0 ? (
+              <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-12 text-center space-y-3">
+                <p className="text-slate-400 font-bold text-sm">Henüz kaydedilmiş kelime yok veya filtreye uymuyor.</p>
+                <button
+                  onClick={handleLoadPresetWords}
+                  className="bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition"
+                >
+                  ⚡ Hazır YDS Kelimelerini Yükle
+                </button>
+              </div>
             ) : (
-              <section className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                {filteredAndSortedWords.map((item) => {
-                  const isFlipped = flippedIds.has(item.id);
-                  const isDeleting = deletingId === item.id;
-                  const isAiLoading = aiSentenceLoadingId === item.id;
-                  
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredWords.map((item) => {
+                  const isMemorized = item.status === "memorized";
+                  const level = item.level || 1;
+
                   return (
                     <div
                       key={item.id}
-                      onClick={() => toggleFlip(item.id)}
-                      className={`flip-card h-56 cursor-pointer relative select-none transition-all duration-300 ${isFlipped ? "flipped" : ""} ${isDeleting ? "opacity-30 scale-95 pointer-events-none" : ""}`}
+                      className="bg-slate-800 border border-slate-700/80 hover:border-slate-600 rounded-2xl p-5 space-y-3 flex flex-col justify-between transition group"
                     >
-                      <div className="flip-card-inner">
-                        {/* KART ÖN YÜZÜ (İNGİLİZCE) */}
-                        <div className={`flip-card-front bg-slate-900/80 border p-5 flex flex-col justify-between backdrop-blur-md rounded-2xl shadow-md transition-all hover:border-slate-700 ${
-                          item.status === "memorized" ? "border-emerald-800/60" : "border-slate-800"
-                        }`}>
-                          <div className="flex justify-between items-start">
-                            <div className="flex gap-1.5 items-center">
-                              <span className="bg-indigo-950 text-indigo-300 border border-indigo-800/60 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full">
-                                {item.sourceLang || "EN"}
-                              </span>
-                              {/* Leitner Level Badge */}
-                              <span className="bg-purple-950 text-purple-300 border border-purple-800/60 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                                Level {item.level || 1}/5
-                              </span>
-                            </div>
-
-                            <div className="flex items-center gap-1">
-                              {/* ✨ AI Cümle Butonu Kelimenin İngilizce Yüzünde */}
-                              <button
-                                onClick={(e) => handleGenerateAISentence(e, item)}
-                                disabled={isAiLoading}
-                                className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1 rounded-lg font-bold transition shadow-sm"
-                                title="AI Örnek Cümle Üret"
-                              >
-                                {isAiLoading ? "..." : "✨ AI Cümle"}
-                              </button>
-                              <button
-                                onClick={(e) => handleSpeak(e, item.word, item.sourceLang)}
-                                className="text-slate-300 p-1.5 hover:bg-slate-800/60 rounded-lg transition text-xs"
-                                title="Telaffuz Et"
-                              >
-                                🔊
-                              </button>
-                              <button
-                                onClick={(e) => handleToggleStatus(e, item)}
-                                className={`p-1.5 rounded-lg border text-xs font-bold ${
-                                  item.status === "memorized" ? "bg-amber-950/60 text-amber-300 border-amber-800/60" : "bg-emerald-950/60 text-emerald-300 border-emerald-800/60"
-                                }`}
-                                title={item.status === "memorized" ? "Öğreniliyor Yap" : "Ezberlendi Yap"}
-                              >
-                                {item.status === "memorized" ? "🔄" : "✔"}
-                              </button>
-                              <button
-                                onClick={(e) => handleDelete(e, item.id)}
-                                disabled={isDeleting}
-                                className="text-slate-400 hover:text-rose-400 p-1.5 rounded-lg transition text-xs"
-                                title="Sil"
-                              >
-                                🗑
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="my-1">
-                            <h2 className="text-xl font-extrabold tracking-tight line-clamp-1 text-slate-100">{item.word}</h2>
-                            {item.exampleSentence ? (
-                              <p className="text-xs text-slate-300 italic mt-1.5 line-clamp-2">
-                                &quot;{item.exampleSentence}&quot;
-                              </p>
-                            ) : (
-                              <p className="text-xs text-slate-300 italic mt-1 line-clamp-1">Örnek cümle eklenmemiş.</p>
-                            )}
-                          </div>
-
-                          <div className="flex justify-between items-center text-[10px] text-slate-300 font-bold">
-                            <span>{formatDate(item.createdAt)}</span>
-                            <span className="text-indigo-400 hover:underline">Çeviriyi Göster ↻</span>
-                          </div>
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <h3 className="text-lg font-bold text-white group-hover:text-blue-400 transition">
+                            {item.word}
+                          </h3>
+                          <span
+                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
+                              isMemorized
+                                ? "bg-emerald-950 text-emerald-400 border-emerald-500/30"
+                                : "bg-amber-950 text-amber-400 border-amber-500/30"
+                            }`}
+                          >
+                            Seviye {level}
+                          </span>
                         </div>
 
-                        {/* KART ARKA YÜZÜ (TÜRKÇE) */}
-                        <div className="flip-card-back bg-gradient-to-br from-slate-900 via-indigo-950 to-purple-950 border border-indigo-800/60 p-5 flex flex-col justify-between rounded-2xl shadow-md">
-                          <div className="flex justify-between items-start">
-                            <span className="bg-purple-950 text-purple-300 border border-purple-800/60 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full">
-                              {item.targetLang || "TR"}
-                            </span>
+                        <p className="text-sm font-semibold text-slate-300 mt-1">{item.translation}</p>
 
-                            <button
-                              onClick={(e) => handleSpeak(e, item.translation, item.targetLang)}
-                              className="text-slate-300 p-1.5 hover:bg-slate-800/60 rounded-lg transition text-xs"
-                              title="Çeviriyi Oku"
-                            >
-                              🔊
-                            </button>
+                        {/* Etiketler */}
+                        {item.tags && item.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {item.tags.map((t) => (
+                              <span key={t} className="text-[10px] bg-slate-900 text-slate-300 px-2 py-0.5 rounded-md font-semibold border border-slate-700">
+                                {t}
+                              </span>
+                            ))}
                           </div>
+                        )}
 
-                          <div className="my-1">
-                            <h2 className="text-xl font-extrabold text-emerald-400 line-clamp-1">{item.translation}</h2>
+                        {/* Örnek Cümle */}
+                        {item.exampleSentence && (
+                          <div className="mt-3 bg-slate-900/80 border border-slate-700/60 rounded-xl p-3 text-xs space-y-1">
+                            <p className="text-slate-200 font-medium italic">"{item.exampleSentence}"</p>
                             {item.exampleTranslation && (
-                              <p className="text-xs text-emerald-300/90 italic mt-1.5 line-clamp-2">
-                                &quot;{item.exampleTranslation}&quot;
-                              </p>
+                              <p className="text-slate-400 font-normal">{item.exampleTranslation}</p>
                             )}
                           </div>
+                        )}
+                      </div>
 
-                          <div className="flex justify-between items-center text-[10px] text-slate-300 font-bold">
-                            <span>{formatDate(item.createdAt)}</span>
-                            <span className="text-indigo-300 hover:underline">Kapat ↻</span>
-                          </div>
+                      {/* Kart Alt Butonları */}
+                      <div className="pt-2 border-t border-slate-700/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={(e) => handleGenerateAISentence(e, item)}
+                            disabled={aiSentenceLoadingId === item.id}
+                            className="text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1"
+                          >
+                            {aiSentenceLoadingId === item.id ? "..." : "✨ Örnek"}
+                          </button>
+                          <span className="text-slate-600">•</span>
+                          <button
+                            onClick={(e) => handleEnrichWord(e, item)}
+                            disabled={enrichLoadingId === item.id}
+                            className="text-blue-400 hover:text-blue-300 font-semibold flex items-center gap-1"
+                          >
+                            {enrichLoadingId === item.id ? "..." : "🔬 YDS Analiz"}
+                          </button>
                         </div>
+
+                        <button
+                          onClick={(e) => handleDeleteWord(e, item.id)}
+                          className="text-rose-400 hover:text-rose-300 font-semibold"
+                        >
+                          Sil
+                        </button>
                       </div>
                     </div>
                   );
                 })}
-              </section>
+              </div>
             )}
-          </>
+          </div>
         )}
 
-        {/* TAB 2: ÇOKLU QUIZ MODLARI */}
+        {/* TAB 2: PRATİK & QUIZ */}
         {activeTab === "quiz" && (
-          <div className="max-w-md mx-auto mt-4 space-y-6">
-            {quizWords.length === 0 ? (
-              <section className="text-center py-16 bg-slate-900/60 border border-emerald-800/50 rounded-3xl p-8 shadow-xl">
-                <span className="text-5xl">🎉</span>
-                <h3 className="text-lg font-extrabold text-emerald-400 mt-5">Tebrikler! Test Tamamlandı!</h3>
-                <p className="text-xs text-slate-300 mt-2">
-                  Tüm kelimelerinizi en az Level 5 (Ezberlendi) seviyesine taşıdınız.
-                </p>
+          <div className="max-w-2xl mx-auto space-y-6">
+            <div className="flex justify-center gap-2 p-1.5 bg-slate-800 rounded-2xl border border-slate-700">
+              {[
+                { id: "flashcard", label: "Kartlar" },
+                { id: "choice", label: "Test (A-D)" },
+                { id: "type", label: "Yazma" },
+                { id: "restatement", label: "Restatement" },
+              ].map((m) => (
                 <button
-                  onClick={() => setActiveTab("list")}
-                  className="mt-6 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-md transition"
+                  key={m.id}
+                  onClick={() => setQuizSubMode(m.id as any)}
+                  className={`flex-1 py-2 rounded-xl text-xs font-bold transition ${
+                    quizSubMode === m.id
+                      ? "bg-blue-600 text-white shadow"
+                      : "text-slate-400 hover:text-white"
+                  }`}
                 >
-                  Kelime Listesine Dön
+                  {m.label}
                 </button>
-              </section>
-            ) : (
-              <div className="space-y-5">
-                {/* Quiz Sub-Mode Seçici */}
-                <div className="flex p-1 bg-slate-950 rounded-xl gap-1 border border-slate-800 shadow-inner">
-                  <button
-                    onClick={() => { setQuizSubMode("flashcard"); resetQuizState(); }}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                      quizSubMode === "flashcard" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    🎴 Kart
-                  </button>
-                  <button
-                    onClick={() => { setQuizSubMode("choice"); resetQuizState(); }}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                      quizSubMode === "choice" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    🎯 4 Şık
-                  </button>
-                  <button
-                    onClick={() => { setQuizSubMode("type"); resetQuizState(); }}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                      quizSubMode === "type" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    ✍️ Yazma
-                  </button>
+              ))}
+            </div>
+
+            {/* Flashcard Modu */}
+            {quizSubMode === "flashcard" && currentQuizWord && (
+              <div className="bg-slate-800 border border-slate-700 rounded-3xl p-8 text-center space-y-6 shadow-xl">
+                <div className="space-y-2">
+                  <span className="text-xs font-extrabold text-blue-400 uppercase tracking-wider">
+                    Kelime {quizIndex + 1} / {quizWords.length}
+                  </span>
+                  <h2 className="text-3xl font-extrabold text-white">{currentQuizWord.word}</h2>
                 </div>
 
-                {/* İlerleme Bilgileri */}
-                <div className="flex justify-between items-center text-xs text-slate-300 font-bold px-1">
-                  <span>Leitner Havuzu: <strong className="text-indigo-400">{quizWords.length} Kelime</strong></span>
-                  <span>Soru #{quizIndex + 1} (Lvl {currentQuizWord?.level || 1})</span>
-                </div>
-
-                {/* MOD 1: FLASHCARD */}
-                {quizSubMode === "flashcard" && currentQuizWord && (
-                  <div className="space-y-5">
-                    <div
-                      onClick={() => setQuizRevealed(!quizRevealed)}
-                      className={`flip-card h-64 w-full cursor-pointer relative select-none transition-all duration-300 ${quizRevealed ? "flipped" : ""}`}
-                    >
-                      <div className="flip-card-inner">
-                        <div className="flip-card-front bg-slate-900/90 border border-slate-800 p-6 flex flex-col justify-between rounded-3xl shadow-xl text-slate-100">
-                          <div className="flex justify-between items-start">
-                            <span className="bg-indigo-950 text-indigo-300 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full border border-indigo-800/60">
-                              {currentQuizWord.sourceLang || "EN"}
-                            </span>
-                            <span className="text-[10px] font-bold text-slate-400">FLASCKARD</span>
-                          </div>
-                          <div className="text-center py-6">
-                            <h2 className="text-2xl font-extrabold text-slate-100">{currentQuizWord.word}</h2>
-                          </div>
-                          <div className="text-center">
-                            <span className="text-xs bg-slate-950/80 py-2 px-4 rounded-full border border-slate-800 font-bold text-slate-300">
-                              Anlamını Göster 👁
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="flip-card-back bg-gradient-to-br from-slate-900 via-indigo-950 to-purple-950 border border-indigo-800/80 p-6 flex flex-col justify-between rounded-3xl shadow-xl">
-                          <div className="flex justify-between items-start">
-                            <span className="bg-purple-950 text-purple-300 text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full border border-purple-800/60">
-                              {currentQuizWord.targetLang || "TR"}
-                            </span>
-                            <button onClick={(e) => handleSpeak(e, currentQuizWord.word, currentQuizWord.sourceLang)} className="p-1.5 text-slate-300">🔊</button>
-                          </div>
-                          <div className="text-center py-6">
-                            <h2 className="text-2xl font-extrabold text-emerald-400">
-                              {quizRevealed ? currentQuizWord.translation : ""}
-                            </h2>
-                          </div>
-                          <div className="text-center text-[10px] text-indigo-300 font-bold">Kapat ↻</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {quizRevealed && (
-                      <div className="grid grid-cols-2 gap-4">
-                        <button
-                          onClick={() => handleQuizAnswerWrong(currentQuizWord.id)}
-                          className="bg-rose-950/80 hover:bg-rose-900 border border-rose-800/60 text-rose-200 font-bold py-3 rounded-2xl text-xs shadow-lg transition active:scale-95"
-                        >
-                          Bilmiyorum ❌ (Lvl 1)
-                        </button>
-                        <button
-                          onClick={() => handleQuizAnswerCorrect(currentQuizWord.id)}
-                          className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800/60 text-emerald-200 font-bold py-3 rounded-2xl text-xs shadow-lg transition active:scale-95"
-                        >
-                          Biliyorum ✔ (+1 Level)
-                        </button>
-                      </div>
+                {quizRevealed ? (
+                  <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 space-y-3 animate-fade-in">
+                    <p className="text-xl font-bold text-emerald-400">{currentQuizWord.translation}</p>
+                    {currentQuizWord.exampleSentence && (
+                      <p className="text-xs text-slate-300 italic">"{currentQuizWord.exampleSentence}"</p>
                     )}
                   </div>
+                ) : (
+                  <button
+                    onClick={() => setQuizRevealed(true)}
+                    className="w-full bg-slate-900 hover:bg-slate-700 text-slate-300 font-bold py-4 rounded-2xl border border-slate-700 transition"
+                  >
+                    Anlamı Göster 👁️
+                  </button>
                 )}
 
-                {/* MOD 2: ÇOKTAN SEÇMELİ TEST (4 ŞIK) */}
-                {quizSubMode === "choice" && currentQuizWord && (
-                  <div className="space-y-4 border rounded-3xl p-6 bg-slate-900/90 border-slate-800 shadow-xl">
-                    <div className="text-center">
-                      <span className="text-[11px] font-extrabold text-indigo-400 uppercase tracking-wider">Çoktan Seçmeli Soru</span>
-                      <h2 className="text-2xl font-extrabold mt-1.5 text-slate-100">{currentQuizWord.word}</h2>
-                      <p className="text-xs text-slate-300 mt-1 font-medium">Doğru Türkçe karşılığını seçin:</p>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-2.5 mt-4">
-                      {choiceOptions.map((choice, idx) => {
-                        const isSelected = choiceSelected === choice;
-                        const isCorrect = choice === currentQuizWord.translation;
-
-                        let btnStyle = "bg-slate-950 border-slate-800 text-slate-200 hover:border-slate-700";
-                        if (choiceFeedback) {
-                          if (isCorrect) {
-                            btnStyle = "bg-emerald-600 border-emerald-500 text-white font-extrabold shadow-md";
-                          } else if (isSelected && !isCorrect) {
-                            btnStyle = "bg-rose-600 border-rose-500 text-white font-extrabold shadow-md";
-                          }
-                        }
-
-                        return (
-                          <button
-                            key={idx}
-                            disabled={!!choiceFeedback}
-                            onClick={() => {
-                              setChoiceSelected(choice);
-                              const correct = choice === currentQuizWord.translation;
-                              setChoiceFeedback({ isCorrect: correct, selected: choice });
-                            }}
-                            className={`p-3.5 rounded-xl border text-xs text-left transition font-bold ${btnStyle}`}
-                          >
-                            {idx + 1}. {choice}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {choiceFeedback && (
-                      <div className="mt-4 text-center space-y-3 pt-2">
-                        <p className={`text-xs font-extrabold ${choiceFeedback.isCorrect ? "text-emerald-400" : "text-rose-400"}`}>
-                          {choiceFeedback.isCorrect ? "🎉 Tebrikler! Doğru Cevap!" : `❌ Yanlış! Doğru cevap: ${currentQuizWord.translation}`}
-                        </p>
-                        <button
-                          onClick={() => {
-                            if (choiceFeedback.isCorrect) handleQuizAnswerCorrect(currentQuizWord.id);
-                            else handleQuizAnswerWrong(currentQuizWord.id);
-                          }}
-                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs shadow-lg transition"
-                        >
-                          Sonraki Kelime ➔
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* MOD 3: YAZMA / SPELLING TESTİ */}
-                {quizSubMode === "type" && currentQuizWord && (
-                  <div className="space-y-4 border rounded-3xl p-6 bg-slate-900/90 border-slate-800 shadow-xl">
-                    <div className="text-center">
-                      <span className="text-[11px] font-extrabold text-purple-400 uppercase tracking-wider">Yazma Testi</span>
-                      <h2 className="text-2xl font-extrabold text-emerald-400 mt-1.5">{currentQuizWord.translation}</h2>
-                      <p className="text-xs text-slate-300 mt-1 font-medium">Bu çevirinin orijinal kelimesini yazın:</p>
-                    </div>
-
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!typingAnswer.trim()) return;
-                        const isCorrect = typingAnswer.trim().toLowerCase() === currentQuizWord.word.trim().toLowerCase();
-                        setTypingFeedback({ isCorrect, correctText: currentQuizWord.word });
-                      }}
-                      className="space-y-3"
+                {quizRevealed && (
+                  <div className="flex gap-4 pt-2">
+                    <button
+                      onClick={() => handleQuizAnswerWrong(currentQuizWord.id)}
+                      className="flex-1 bg-rose-600 hover:bg-rose-500 text-white font-bold py-3.5 rounded-2xl transition"
                     >
-                      <input
-                        type="text"
-                        value={typingAnswer}
-                        disabled={!!typingFeedback}
-                        onChange={(e) => setTypingAnswer(e.target.value)}
-                        placeholder="Cevabınızı buraya yazın..."
-                        className="w-full rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-purple-500/50 bg-slate-950 border border-slate-800 text-white placeholder-slate-500"
-                      />
-
-                      {!typingFeedback && (
-                        <button
-                          type="submit"
-                          className="w-full py-3 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl text-xs shadow-lg transition"
-                        >
-                          Kontrol Et ✔
-                        </button>
-                      )}
-                    </form>
-
-                    {typingFeedback && (
-                      <div className="mt-4 text-center space-y-3 pt-2">
-                        <p className={`text-xs font-extrabold ${typingFeedback.isCorrect ? "text-emerald-400" : "text-rose-400"}`}>
-                          {typingFeedback.isCorrect ? "🎉 Harika! Mükemmel Yazım!" : `❌ Doğru Yazım: ${typingFeedback.correctText}`}
-                        </p>
-                        <button
-                          onClick={() => {
-                            if (typingFeedback.isCorrect) handleQuizAnswerCorrect(currentQuizWord.id);
-                            else handleQuizAnswerWrong(currentQuizWord.id);
-                          }}
-                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs shadow-lg transition"
-                        >
-                          Sonraki Kelime ➔
-                        </button>
-                      </div>
-                    )}
+                      ❌ Yanlış
+                    </button>
+                    <button
+                      onClick={() => handleQuizAnswerCorrect(currentQuizWord.id)}
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-2xl transition"
+                    >
+                      ✔ Doğru
+                    </button>
                   </div>
                 )}
               </div>
             )}
+
+            {/* Choice Modu */}
+            {quizSubMode === "choice" && currentQuizWord && (
+              <div className="bg-slate-800 border border-slate-700 rounded-3xl p-8 space-y-6 shadow-xl">
+                <div className="text-center space-y-2">
+                  <span className="text-xs font-extrabold text-purple-400 uppercase tracking-wider">
+                    Kelime {quizIndex + 1} / {quizWords.length}
+                  </span>
+                  <h2 className="text-2xl font-extrabold text-white">"{currentQuizWord.word}" karşılığı nedir?</h2>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3">
+                  {choiceOptions.map((opt) => {
+                    const isSelected = choiceSelected === opt;
+                    const isCorrect = opt === currentQuizWord.translation;
+                    let btnStyle = "bg-slate-900 border-slate-700 text-slate-200 hover:border-slate-500";
+
+                    if (choiceFeedback) {
+                      if (isCorrect) btnStyle = "bg-emerald-950 border-emerald-500 text-emerald-300 font-bold";
+                      else if (isSelected && !isCorrect) btnStyle = "bg-rose-950 border-rose-500 text-rose-300 font-bold";
+                    }
+
+                    return (
+                      <button
+                        key={opt}
+                        disabled={!!choiceFeedback}
+                        onClick={() => {
+                          setChoiceSelected(opt);
+                          const correct = opt === currentQuizWord.translation;
+                          setChoiceFeedback({ isCorrect: correct, selected: opt });
+                        }}
+                        className={`w-full p-4 rounded-2xl border text-left font-semibold text-sm transition ${btnStyle}`}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {choiceFeedback && (
+                  <div className="pt-2 flex justify-end">
+                    <button
+                      onClick={() => {
+                        if (choiceFeedback.isCorrect) handleQuizAnswerCorrect(currentQuizWord.id);
+                        else handleQuizAnswerWrong(currentQuizWord.id);
+                      }}
+                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 py-3 rounded-2xl transition"
+                    >
+                      Sonraki Kelime ➔
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Restatement Modu */}
+            {quizSubMode === "restatement" && (
+              <div className="bg-slate-800 border border-slate-700 rounded-3xl p-6 space-y-6 shadow-xl">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-base font-bold text-white">YDS Restatement (Yakın Anlam)</h3>
+                  <button
+                    onClick={handleGenerateRestatement}
+                    disabled={restatementLoading}
+                    className="bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs px-3 py-2 rounded-xl"
+                  >
+                    {restatementLoading ? "Yükleniyor..." : "✨ Soru Üret"}
+                  </button>
+                </div>
+
+                {restatementQuestions.length > 0 && restatementQuestions[restatementIndex] ? (
+                  <div className="space-y-4">
+                    <div className="bg-slate-900 border border-slate-700 p-4 rounded-2xl text-sm font-semibold text-white italic">
+                      "{restatementQuestions[restatementIndex].originalSentence}"
+                    </div>
+
+                    <div className="space-y-2">
+                      {restatementQuestions[restatementIndex].options.map((opt) => (
+                        <button
+                          key={opt}
+                          disabled={!!restatementFeedback}
+                          onClick={() => {
+                            setRestatementSelected(opt);
+                            const isCorrect = opt.startsWith(restatementQuestions[restatementIndex].answer[0]);
+                            setRestatementFeedback({ isCorrect, selected: opt });
+                          }}
+                          className={`w-full text-left p-3.5 rounded-xl border text-xs font-medium transition ${
+                            restatementSelected === opt
+                              ? restatementFeedback?.isCorrect
+                                ? "bg-emerald-950 border-emerald-500 text-emerald-300"
+                                : "bg-rose-950 border-rose-500 text-rose-300"
+                              : "bg-slate-900 border-slate-700 text-slate-200"
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+
+                    {restatementFeedback && (
+                      <div className="bg-slate-900 border border-slate-700 p-4 rounded-2xl text-xs space-y-2">
+                        <p className="font-bold text-amber-400">Çözüm / Açıklama:</p>
+                        <p className="text-slate-300">{restatementQuestions[restatementIndex].explanation}</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400 text-center py-6">
+                    Yakın anlamlı cümle pratiği için 'Soru Üret' butonuna tıklayın.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: YDS SINAV & PARAGRAF */}
+        {activeTab === "yds" && (
+          <div className="space-y-6">
+            <div className="bg-slate-800 border border-slate-700 rounded-3xl p-6 space-y-4">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-white">YDS 4 Sorulu Paragraf Seti Sınavı</h2>
+                  <p className="text-xs text-slate-400">
+                    Akademik C1 okuma metni ve altındaki 4 klasik ÖSYM YDS soru tipi (Main Idea, Detail, Inference, Vocabulary)
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleGeneratePassageSet}
+                  disabled={passageLoading}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition flex items-center gap-1.5"
+                >
+                  {passageLoading ? "YDS Metni Üretiliyor..." : "⚡ YDS Paragraf Sınavı Oluştur"}
+                </button>
+              </div>
+
+              {passageSet && (
+                <div className="space-y-6 pt-4 border-t border-slate-700">
+                  {/* PARAGRAF METNİ */}
+                  <div className="bg-slate-900 border border-slate-700 rounded-2xl p-5 space-y-3">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-sm font-bold text-amber-400">{passageSet.title}</h3>
+                      <button
+                        onClick={() => setShowPassageTr(!showPassageTr)}
+                        className="text-xs font-semibold text-blue-400 hover:underline"
+                      >
+                        {showPassageTr ? "Türkçe Gizle" : "Türkçe Göster"}
+                      </button>
+                    </div>
+
+                    <p className="text-sm text-slate-200 leading-relaxed font-medium">{passageSet.passageEn}</p>
+
+                    {showPassageTr && (
+                      <p className="text-xs text-slate-400 leading-relaxed border-t border-slate-800 pt-3 italic">
+                        {passageSet.passageTr}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* SORULAR */}
+                  <div className="space-y-6">
+                    {passageSet.questions.map((q, idx) => (
+                      <div key={q.id} className="bg-slate-800/90 border border-slate-700 rounded-2xl p-5 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-md">
+                            Soru {idx + 1} • {q.type.toUpperCase()}
+                          </span>
+                        </div>
+
+                        <p className="text-sm font-bold text-white">{q.question}</p>
+
+                        <div className="space-y-2 pt-1">
+                          {q.options.map((opt) => {
+                            const isSelected = passageAnswers[q.id] === opt;
+                            const isCorrect = opt.startsWith(q.answer[0]);
+
+                            let style = "bg-slate-900 border-slate-700 text-slate-300 hover:border-slate-500";
+                            if (passageSubmitted) {
+                              if (isCorrect) style = "bg-emerald-950 border-emerald-500 text-emerald-300 font-bold";
+                              else if (isSelected && !isCorrect) style = "bg-rose-950 border-rose-500 text-rose-300 font-bold";
+                            } else if (isSelected) {
+                              style = "bg-blue-950 border-blue-500 text-blue-300 font-bold";
+                            }
+
+                            return (
+                              <button
+                                key={opt}
+                                disabled={passageSubmitted}
+                                onClick={() => setPassageAnswers((prev) => ({ ...prev, [q.id]: opt }))}
+                                className={`w-full text-left p-3 rounded-xl border text-xs font-medium transition ${style}`}
+                              >
+                                {opt}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {passageSubmitted && (
+                          <div className="bg-slate-900/90 border border-slate-700 p-3.5 rounded-xl text-xs space-y-1">
+                            <span className="font-bold text-amber-400">Çözüm Analizi: </span>
+                            <span className="text-slate-300">{q.explanation}</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {!passageSubmitted && (
+                    <button
+                      onClick={() => setPassageSubmitted(true)}
+                      className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-2xl transition"
+                    >
+                      Sınavı Bitir ve Analizi Gör
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: GRAMER & CÜMLE PARÇALAYICI */}
+        {activeTab === "grammar" && (
+          <div className="space-y-6">
+            <div className="bg-slate-800 border border-slate-700 rounded-3xl p-6 space-y-4">
+              <div>
+                <h2 className="text-lg font-bold text-white">YDS Görsel Cümle Parçalayıcı (Özne-Yüklem-Bağlaç)</h2>
+                <p className="text-xs text-slate-400">
+                  Karmaşık YDS akademik cümlelerini girin; Özne, Yüklem, Bağlaç ve Yan Cümle ayrıştırmasını inceleyin.
+                </p>
+              </div>
+
+              <form onSubmit={handleAnalyzeSentenceSubmit} className="space-y-3">
+                <textarea
+                  rows={3}
+                  value={sentenceInput}
+                  onChange={(e) => setSentenceInput(e.target.value)}
+                  placeholder="İncelemek istediğiniz YDS cümlesini buraya yapıştırın..."
+                  className="w-full rounded-2xl p-4 text-sm bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                />
+
+                <button
+                  type="submit"
+                  disabled={sentenceLoading}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-5 py-3 rounded-xl transition"
+                >
+                  {sentenceLoading ? "Cümle Parçalanıyor..." : "🔬 Cümleyi Analiz Et"}
+                </button>
+              </form>
+
+              {sentenceAnalysis && (
+                <div className="bg-slate-900 border border-slate-700 rounded-2xl p-5 space-y-4 mt-4">
+                  <div className="flex flex-wrap gap-2">
+                    <span className="bg-blue-950 text-blue-300 border border-blue-500/40 px-3 py-1 rounded-xl text-xs font-bold">
+                      👤 Özne: {sentenceAnalysis.subject}
+                    </span>
+                    <span className="bg-emerald-950 text-emerald-300 border border-emerald-500/40 px-3 py-1 rounded-xl text-xs font-bold">
+                      🎯 Yüklem: {sentenceAnalysis.mainVerb}
+                    </span>
+                    <span className="bg-purple-950 text-purple-300 border border-purple-500/40 px-3 py-1 rounded-xl text-xs font-bold">
+                      ⏱ Tense: {sentenceAnalysis.tense}
+                    </span>
+                  </div>
+
+                  {sentenceAnalysis.conjunctions.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-xs font-bold text-amber-400">Bağlaçlar & Geçişler:</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {sentenceAnalysis.conjunctions.map((c) => (
+                          <span key={c.word} className="bg-amber-950 text-amber-300 border border-amber-500/40 px-2.5 py-0.5 rounded-lg text-xs font-semibold">
+                            {c.word} ({c.type})
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {sentenceAnalysis.simplifiedTurkish && (
+                    <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700 text-xs text-slate-300">
+                      <span className="font-bold text-emerald-400">Basitleştirilmiş Türkçe Çeviri: </span>
+                      {sentenceAnalysis.simplifiedTurkish}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 5: ETİKETLER */}
+        {activeTab === "tags" && (
+          <div className="space-y-4">
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-5">
+              <h3 className="text-sm font-bold text-white mb-3">YDS Kelime Türleri ve Etiket Filtresi</h3>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setActiveTagFilter("all")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+                    activeTagFilter === "all" ? "bg-blue-600 text-white" : "bg-slate-900 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Tüm Etiketler
+                </button>
+                {ALL_TAGS.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setActiveTagFilter(t)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                      activeTagFilter === t
+                        ? "bg-blue-600 border-blue-500 text-white"
+                        : "bg-slate-900 border-slate-700 text-slate-300 hover:border-slate-500"
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </main>
 
-      {/* MODAL 1: GEMINI API KEY MODALI */}
-      {showApiKeyModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="max-w-md w-full rounded-3xl p-6 border shadow-2xl bg-slate-950 border-slate-800 text-white space-y-4">
-            <h3 className="text-base font-extrabold text-slate-100">✨ Gemini AI API Key Ayarı</h3>
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Google AI Studio üzerinden alacağınız API anahtarını buraya ekleyebilirsiniz. Key eklemezseniz dahili akıllı şablonlar çalışacaktır.
-            </p>
+      {/* MOBİL SABİT ALT GEZİNTİ BAR (PWA / MOBILE BOTTOM NAV BAR) */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900/95 border-t border-slate-800 backdrop-blur-md flex justify-around p-2 text-xs font-bold text-slate-400">
+        {[
+          { id: "list", label: "Kelimeler", icon: "📚" },
+          { id: "quiz", label: "Pratik", icon: "⚡" },
+          { id: "yds", label: "YDS Sınav", icon: "📝" },
+          { id: "grammar", label: "Gramer", icon: "🔬" },
+          { id: "tags", label: "Etiketler", icon: "🏷️" },
+        ].map((item) => (
+          <button
+            key={item.id}
+            onClick={() => setActiveTab(item.id as any)}
+            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition ${
+              activeTab === item.id ? "text-blue-400 font-extrabold" : "hover:text-slate-200"
+            }`}
+          >
+            <span className="text-base">{item.icon}</span>
+            <span className="text-[10px]">{item.label}</span>
+          </button>
+        ))}
+      </nav>
 
+      {/* API KEY MODAL */}
+      {showApiKeyModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-3xl p-6 max-w-md w-full space-y-4">
+            <h3 className="text-base font-bold text-white">Gemini API Key Yapılandırması</h3>
+            <p className="text-xs text-slate-400">
+              YDS soru üretimi ve yapay zeka içerikleri için Google Gemini API key'inizi girin.
+            </p>
             <input
-              type="password"
+              type="text"
               value={geminiApiKey}
               onChange={(e) => setGeminiApiKey(e.target.value)}
               placeholder="AIzaSy..."
-              className="w-full p-3 rounded-xl border text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50 bg-slate-900 border-slate-800 text-slate-100"
+              className="w-full rounded-xl px-4 py-2.5 text-sm bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
             />
-
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex gap-2">
               <button
-                onClick={() => setShowApiKeyModal(false)}
-                className="px-4 py-2 text-xs font-bold text-slate-300 hover:text-white"
-              >
-                Vazgeç
-              </button>
-              <button
-                onClick={() => handleSaveApiKey(geminiApiKey)}
-                className="px-5 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-lg transition"
+                onClick={() => {
+                  localStorage.setItem("gemini_key", geminiApiKey);
+                  setShowApiKeyModal(false);
+                }}
+                className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-xs transition"
               >
                 Kaydet
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL 2: AI OKUMA METNİ MODALI */}
-      {aiStoryOpen && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="max-w-lg w-full rounded-3xl p-6 border shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto bg-slate-950 border-slate-800 text-white">
-            <div className="flex justify-between items-center">
-              <h3 className="text-base font-extrabold flex items-center gap-2 text-slate-100">✨ AI Özel Okuma Metni Generator</h3>
-              <button onClick={() => setAiStoryOpen(false)} className="text-slate-400 hover:text-white font-bold text-sm">✕</button>
-            </div>
-
-            {aiStoryLoading ? (
-              <div className="py-12 text-center text-slate-300 text-xs font-bold animate-pulse">
-                Yapay Zeka kelimelerinizle akıcı okuma metni oluşturuyor...
-              </div>
-            ) : aiStoryData ? (
-              <div className="space-y-4">
-                <div className="p-4 bg-indigo-950/60 border border-indigo-800/50 rounded-2xl">
-                  <h4 className="text-[11px] font-extrabold text-indigo-400 uppercase tracking-wider mb-1.5">İngilizce Okuma Metni</h4>
-                  <p className="text-xs leading-relaxed text-indigo-100 font-medium">{aiStoryData.storyEn}</p>
-                </div>
-
-                <div className="p-4 bg-purple-950/60 border border-purple-800/50 rounded-2xl">
-                  <h4 className="text-[11px] font-extrabold text-purple-400 uppercase tracking-wider mb-1.5">Türkçe Çevirisi</h4>
-                  <p className="text-xs leading-relaxed text-purple-100 font-medium">{aiStoryData.storyTr}</p>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="flex justify-end pt-2">
               <button
-                onClick={() => setAiStoryOpen(false)}
-                className="px-5 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg hover:bg-indigo-500"
+                onClick={() => setShowApiKeyModal(false)}
+                className="bg-slate-800 text-slate-300 font-bold px-4 py-2.5 rounded-xl text-xs hover:bg-slate-700 transition"
               >
                 Kapat
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* MODAL 3: İÇE AKTAR (IMPORT) MODALI */}
-      {isImportModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="max-w-md w-full rounded-3xl p-6 border shadow-2xl space-y-4 bg-slate-950 border-slate-800 text-white">
-            <h3 className="text-base font-extrabold text-slate-100">📥 Toplu Kelime Yükle (CSV / JSON)</h3>
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Bilgisayarınızdan Anki, Quizlet veya Excel uyumlu CSV / JSON dosyası seçerek kelimeleri toplu ekleyebilirsiniz.
-            </p>
-
-            <input
-              type="file"
-              accept=".csv, .json"
-              onChange={handleFileUpload}
-              disabled={importing}
-              className="block w-full text-xs text-slate-300 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
-            />
-
-            {importStatus && (
-              <p className="text-xs font-bold text-indigo-400 mt-2 bg-indigo-950/40 p-2.5 rounded-xl border border-indigo-800/40">{importStatus}</p>
-            )}
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => { setIsImportModalOpen(false); setImportStatus(""); }}
-                className="px-5 py-2 bg-slate-800 text-white text-xs font-bold rounded-xl hover:bg-slate-700"
-              >
-                Kapat
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* SEÇİLEN METİN HIZLI EKLEME TOOLTIP'I */}
-      {selectedWordTooltip && (
-        <div
-          style={{
-            position: "fixed",
-            left: `${selectedWordTooltip.x}px`,
-            top: `${selectedWordTooltip.y}px`,
-            transform: "translateX(-50%)",
-            zIndex: 9999,
-          }}
-          className="animate-in fade-in zoom-in-95 duration-150"
-        >
-          <button
-            onMouseDown={(e) => {
-              e.preventDefault();
-              handleAddSelectedWord();
-            }}
-            disabled={addingSelectedWord}
-            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 via-teal-600 to-indigo-600 hover:from-emerald-400 hover:to-indigo-500 text-white font-extrabold text-xs px-4 py-2 rounded-full shadow-2xl border border-emerald-400/40 active:scale-95 transition-all cursor-pointer"
-          >
-            {addingSelectedWord ? "Ekleniyor..." : `➕ Deftere Ekle: "${selectedWordTooltip.word}"`}
-          </button>
-        </div>
-      )}
-
-      {/* HIZLI EKLEME BAŞARI TOAST MESAJI */}
-      {quickAddSuccessMsg && (
-        <div className="fixed bottom-6 right-6 z-50 bg-emerald-950 border border-emerald-800/80 text-emerald-200 font-bold text-xs px-4 py-3 rounded-2xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-4">
-          <span>{quickAddSuccessMsg}</span>
         </div>
       )}
     </div>
